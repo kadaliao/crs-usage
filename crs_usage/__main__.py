@@ -7,7 +7,8 @@ import sys
 import tomllib
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -15,6 +16,14 @@ from urllib.parse import urlparse
 DEFAULT_CONFIG = Path.home() / ".codex" / "config.toml"
 DEFAULT_AUTH = Path.home() / ".codex" / "auth.json"
 USER_STATS_PATH = "/apiStats/api/user-stats"
+USER_MODEL_STATS_PATH = "/apiStats/api/user-model-stats"
+
+PERIOD_LABELS = {
+    "daily": "今日",
+    "monthly": "本月",
+    "alltime": "累计",
+}
+PERIOD_ORDER = ("daily", "monthly", "alltime")
 
 
 @dataclass
@@ -24,6 +33,13 @@ class ProviderTarget:
     env_key: str | None
     key: str | None
     key_source: str | None
+
+
+@dataclass
+class FetchResult:
+    stats: dict[str, Any] | None = None
+    model_stats: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
 
 
 def origin_of(base_url: str) -> str:
@@ -120,22 +136,115 @@ def build_targets(
     return targets
 
 
-def call_user_stats(origin: str, api_key: str, timeout: float) -> dict[str, Any]:
+def _post_json(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
     req = urllib.request.Request(
-        f"{origin}{USER_STATS_PATH}",
-        data=json.dumps({"apiKey": api_key}).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "crs-usage/0.1"},
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "crs-usage/0.2"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-    return json.loads(body)
+        body_text = resp.read().decode("utf-8", errors="replace")
+    return json.loads(body_text)
+
+
+def call_user_stats(origin: str, api_key: str, timeout: float) -> dict[str, Any]:
+    return _post_json(f"{origin}{USER_STATS_PATH}", {"apiKey": api_key}, timeout)
+
+
+def call_user_model_stats(
+    origin: str, api_key: str, period: str, timeout: float
+) -> dict[str, Any]:
+    return _post_json(
+        f"{origin}{USER_MODEL_STATS_PATH}",
+        {"apiKey": api_key, "period": period},
+        timeout,
+    )
+
+
+def _humanize_http_error(e: urllib.error.HTTPError) -> str:
+    body = e.read().decode("utf-8", errors="replace")
+    try:
+        j = json.loads(body)
+        msg = j.get("message") or j.get("error") or body
+    except json.JSONDecodeError:
+        msg = body or f"HTTP {e.code}"
+    return f"HTTP {e.code}: {msg}"
+
+
+def _safe_call(fn, *args) -> tuple[bool, Any]:
+    try:
+        return True, fn(*args)
+    except urllib.error.HTTPError as e:
+        return False, _humanize_http_error(e)
+    except urllib.error.URLError as e:
+        return False, f"connection error: {e.reason}"
+    except TimeoutError as e:
+        return False, f"timeout: {e}"
+    except json.JSONDecodeError as e:
+        return False, f"invalid JSON response: {e}"
+
+
+def fetch_all(
+    provider: ProviderTarget, periods: tuple[str, ...], timeout: float
+) -> tuple[bool, FetchResult | str]:
+    if not provider.base_url:
+        return False, "no base_url in config"
+    if not provider.key:
+        return False, (
+            f"no key resolved (env_key={provider.env_key!r}, "
+            "no OPENAI_API_KEY in auth.json, no --key)"
+        )
+    try:
+        origin = origin_of(provider.base_url)
+    except ValueError as e:
+        return False, str(e)
+
+    result = FetchResult()
+
+    with ThreadPoolExecutor(max_workers=max(1, 1 + len(periods))) as ex:
+        f_stats = ex.submit(_safe_call, call_user_stats, origin, provider.key, timeout)
+        f_models = {
+            p: ex.submit(_safe_call, call_user_model_stats, origin, provider.key, p, timeout)
+            for p in periods
+        }
+
+        ok, payload = f_stats.result()
+        if not ok:
+            return False, str(payload)
+        if not payload.get("success"):
+            msg = payload.get("message") or payload.get("error") or "unknown error"
+            return False, str(msg)
+        result.stats = payload
+
+        for p, fut in f_models.items():
+            ok, payload = fut.result()
+            if not ok:
+                result.errors[p] = str(payload)
+                result.model_stats[p] = []
+                continue
+            if not payload.get("success"):
+                result.errors[p] = str(payload.get("message") or payload.get("error") or "unknown error")
+                result.model_stats[p] = []
+                continue
+            result.model_stats[p] = payload.get("data") or []
+
+    return True, result
 
 
 def _format_money(x: float | int | None) -> str:
     if x is None:
         return "-"
-    return f"${float(x):.4f}"
+    return f"${float(x):,.4f}"
+
+
+def _format_money_short(x: float | int | None) -> str:
+    if x is None:
+        return "-"
+    v = float(x)
+    if abs(v) >= 100:
+        return f"${v:,.2f}"
+    return f"${v:,.4f}"
 
 
 def _format_int(n: int | float | None) -> str:
@@ -146,7 +255,7 @@ def _format_int(n: int | float | None) -> str:
 
 def _format_pct(used: float | int | None, limit: float | int | None) -> str:
     if not limit or float(limit) <= 0:
-        return "unlimited"
+        return f"{_format_money(used)}（无上限）"
     pct = float(used or 0) / float(limit) * 100
     return f"{_format_money(used)} / {_format_money(limit)}  ({pct:.1f}%)"
 
@@ -163,50 +272,133 @@ def _format_seconds(s: int | None) -> str:
     return f"{sec}s"
 
 
-def render_text(provider: ProviderTarget, payload: dict[str, Any]) -> str:
+def _display_width(s: str) -> int:
+    """Approximate terminal width: CJK 字符按 2 计，其他按 1。"""
+    width = 0
+    for ch in s:
+        o = ord(ch)
+        if o >= 0x1100 and (
+            o <= 0x115F
+            or 0x2E80 <= o <= 0x303E
+            or 0x3041 <= o <= 0x33FF
+            or 0x3400 <= o <= 0x4DBF
+            or 0x4E00 <= o <= 0x9FFF
+            or 0xA000 <= o <= 0xA4CF
+            or 0xAC00 <= o <= 0xD7A3
+            or 0xF900 <= o <= 0xFAFF
+            or 0xFE30 <= o <= 0xFE4F
+            or 0xFF00 <= o <= 0xFF60
+            or 0xFFE0 <= o <= 0xFFE6
+        ):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _pad(s: str, width: int, align: str = "left") -> str:
+    diff = width - _display_width(s)
+    if diff <= 0:
+        return s
+    if align == "right":
+        return " " * diff + s
+    return s + " " * diff
+
+
+def _render_model_table(models: list[dict[str, Any]], top: int) -> list[str]:
+    rows: list[tuple[str, str, str, str, str, str]] = [
+        ("模型", "请求", "Tokens", "输入/输出", "缓存读写", "费用")
+    ]
+    shown = models[:top] if top > 0 else models
+    for m in shown:
+        model_name = str(m.get("model", "?"))
+        req = _format_int(m.get("requests"))
+        tokens = _format_int(m.get("allTokens"))
+        in_tok = _format_int(m.get("inputTokens"))
+        out_tok = _format_int(m.get("outputTokens"))
+        cc = _format_int(m.get("cacheCreateTokens"))
+        cr = _format_int(m.get("cacheReadTokens"))
+        cost = m.get("costs", {}).get("total")
+        cost_str = _format_money_short(cost) if cost is not None else "-"
+        rows.append((
+            model_name,
+            req,
+            tokens,
+            f"{in_tok} / {out_tok}",
+            f"{cc} / {cr}",
+            cost_str,
+        ))
+
+    widths = [0] * 6
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], _display_width(cell))
+
+    aligns = ("left", "right", "right", "right", "right", "right")
+    lines: list[str] = []
+    for idx, row in enumerate(rows):
+        cells = [_pad(c, widths[i], aligns[i]) for i, c in enumerate(row)]
+        line = "      " + "  ".join(cells)
+        lines.append(line)
+        if idx == 0:
+            sep = "      " + "  ".join("─" * widths[i] for i in range(6))
+            lines.append(sep)
+
+    if top > 0 and len(models) > top:
+        lines.append(f"      （还有 {len(models) - top} 个模型未列出，可用 --top 查看更多）")
+    return lines
+
+
+def render_text(
+    provider: ProviderTarget,
+    result: FetchResult,
+    periods: tuple[str, ...],
+    top: int,
+    show_models: bool,
+) -> str:
     out: list[str] = []
     origin = origin_of(provider.base_url) if provider.base_url else "?"
-    header = f"■ {provider.name}  ({origin})  key from {provider.key_source}"
-    out.append(header)
+    out.append(f"■ {provider.name}  {origin}  key 来源 {provider.key_source}")
 
+    payload = result.stats or {}
     data = payload.get("data") or {}
     usage_total = (data.get("usage") or {}).get("total") or {}
     limits = data.get("limits") or {}
 
     name = data.get("name") or "-"
     key_id = data.get("id") or "-"
-    active_raw = data.get("isActive")
-    active = "true" if active_raw else "false"
-    expires = data.get("expiresAt") or "never"
-    out.append(f"  Key: {name}  id={key_id}  active={active}  expires={expires}")
+    active = "启用" if data.get("isActive") else "禁用"
+    expires_raw = data.get("expiresAt")
+    expires = expires_raw if expires_raw else "永不过期"
+    out.append(f"  Key: {name}  id={key_id}  {active}  {expires}")
 
-    out.append("  Usage (total):")
-    out.append(f"    Requests : {_format_int(usage_total.get('requests'))}")
-    in_tok = usage_total.get("inputTokens", 0)
-    out_tok = usage_total.get("outputTokens", 0)
-    cc_tok = usage_total.get("cacheCreateTokens", 0)
-    cr_tok = usage_total.get("cacheReadTokens", 0)
+    out.append("")
+    out.append("  📊 累计用量")
+    in_tok = usage_total.get("inputTokens", 0) or 0
+    out_tok = usage_total.get("outputTokens", 0) or 0
+    cc_tok = usage_total.get("cacheCreateTokens", 0) or 0
+    cr_tok = usage_total.get("cacheReadTokens", 0) or 0
     all_tok = usage_total.get("allTokens") or (in_tok + out_tok + cc_tok + cr_tok)
-    out.append(
-        f"    Tokens   : {_format_int(all_tok)}  "
-        f"(in {_format_int(in_tok)} / out {_format_int(out_tok)} / "
-        f"cache_create {_format_int(cc_tok)} / cache_read {_format_int(cr_tok)})"
-    )
+    out.append(f"    请求      {_format_int(usage_total.get('requests'))}")
+    out.append(f"    Tokens    {_format_int(all_tok)}")
+    out.append(f"              输入 {_format_int(in_tok)} / 输出 {_format_int(out_tok)}")
+    out.append(f"              缓存创建 {_format_int(cc_tok)} / 读取 {_format_int(cr_tok)}")
     cost = usage_total.get("cost")
-    formatted_cost = usage_total.get("formattedCost")
-    out.append(f"    Cost     : {formatted_cost or _format_money(cost)}")
+    out.append(f"    费用      {_format_money(cost)}")
 
-    out.append("  Limits:")
+    out.append("")
+    out.append("  💰 限额")
     daily_used = limits.get("currentDailyCost", 0)
     daily_lim = limits.get("dailyCostLimit", 0)
-    out.append(f"    Daily Cost : {_format_pct(daily_used, daily_lim)}")
-
+    out.append(f"    今日费用  {_format_pct(daily_used, daily_lim)}")
     total_used = limits.get("currentTotalCost", 0)
     total_lim = limits.get("totalCostLimit", 0)
-    out.append(f"    Total Cost : {_format_pct(total_used, total_lim)}")
+    out.append(f"    总费用    {_format_pct(total_used, total_lim)}")
 
     win_min = limits.get("rateLimitWindow", 0) or 0
     if win_min:
+        win_h, win_m = divmod(int(win_min), 60)
+        win_label = f"{win_h}h{win_m:02d}m" if win_h else f"{win_m}m"
         req_used = limits.get("currentWindowRequests", 0)
         req_lim = limits.get("rateLimitRequests", 0)
         tok_used = limits.get("currentWindowTokens", 0)
@@ -214,119 +406,107 @@ def render_text(provider: ProviderTarget, payload: dict[str, Any]) -> str:
         cost_used = limits.get("currentWindowCost", 0)
         cost_lim = limits.get("rateLimitCost", 0)
         remaining = _format_seconds(limits.get("windowRemainingSeconds"))
-        parts = []
-        parts.append(
-            f"{_format_int(req_used)}/{_format_int(req_lim) if req_lim else '∞'} req"
-        )
-        parts.append(
-            f"{_format_int(tok_used)}/{_format_int(tok_lim) if tok_lim else '∞'} tok"
-        )
-        parts.append(
-            f"{_format_money(cost_used)}/{_format_money(cost_lim) if cost_lim else '∞'}"
-        )
+        out.append(f"    速率窗口  窗口 {win_label}，剩余 {remaining}")
         out.append(
-            f"    Rate Window: {', '.join(parts)}  window={win_min}m  剩余 {remaining}"
+            f"              请求 {_format_int(req_used)}/"
+            f"{_format_int(req_lim) if req_lim else '∞'}  "
+            f"Tokens {_format_int(tok_used)}/"
+            f"{_format_int(tok_lim) if tok_lim else '∞'}  "
+            f"费用 {_format_money(cost_used)}/"
+            f"{_format_money(cost_lim) if cost_lim else '∞'}"
         )
     else:
-        out.append("    Rate Window: unlimited")
+        out.append("    速率窗口  未配置")
 
     weekly_lim = limits.get("weeklyOpusCostLimit", 0)
     if weekly_lim:
-        out.append(
-            f"    Weekly Opus: {_format_pct(limits.get('weeklyOpusCost', 0), weekly_lim)}"
-        )
+        out.append(f"    本周 Opus {_format_pct(limits.get('weeklyOpusCost', 0), weekly_lim)}")
+
+    if show_models:
+        out.append("")
+        out.append("  🧠 模型细分")
+        for p in periods:
+            label = PERIOD_LABELS.get(p, p)
+            err = result.errors.get(p)
+            models = result.model_stats.get(p, [])
+            if err:
+                out.append(f"    [{label}]  查询失败：{err}")
+                continue
+            count = len(models)
+            if count == 0:
+                out.append(f"    [{label}]  无数据")
+                continue
+            out.append(f"    [{label}]  {count} 个模型")
+            out.extend(_render_model_table(models, top))
 
     return "\n".join(out)
 
 
 def render_error(provider: ProviderTarget, message: str) -> str:
     origin = origin_of(provider.base_url) if provider.base_url else "?"
-    return f"■ {provider.name}  ({origin})  ERROR: {message}"
-
-
-def query_one(provider: ProviderTarget, timeout: float) -> tuple[bool, dict[str, Any] | str]:
-    if not provider.base_url:
-        return False, "no base_url in config"
-    if not provider.key:
-        return False, (
-            f"no key resolved (env_key={provider.env_key!r}, "
-            "no OPENAI_API_KEY in auth.json, no --key)"
-        )
-    try:
-        origin = origin_of(provider.base_url)
-    except ValueError as e:
-        return False, str(e)
-    try:
-        payload = call_user_stats(origin, provider.key, timeout)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        try:
-            j = json.loads(body)
-            msg = j.get("message") or j.get("error") or body
-        except json.JSONDecodeError:
-            msg = body or f"HTTP {e.code}"
-        return False, f"HTTP {e.code}: {msg}"
-    except urllib.error.URLError as e:
-        return False, f"connection error: {e.reason}"
-    except TimeoutError as e:
-        return False, f"timeout: {e}"
-    except json.JSONDecodeError as e:
-        return False, f"invalid JSON response: {e}"
-
-    if not payload.get("success"):
-        return False, payload.get("message") or payload.get("error") or "unknown error"
-    return True, payload
+    return f"■ {provider.name}  {origin}  错误：{message}"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="crs-usage",
         description=(
-            "Query claude-relay-service usage via your local Codex config. "
-            "Reads ~/.codex/config.toml to find providers and POSTs to "
-            "{base_origin}/apiStats/api/user-stats."
+            "通过本地 Codex 配置查询 claude-relay-service 用量、限额与模型细分。"
+            "读取 ~/.codex/config.toml，向 {base_origin}/apiStats/api/user-stats "
+            "和 user-model-stats 发起请求。"
         ),
     )
-    parser.add_argument("--provider", help="only query the given provider name")
-    parser.add_argument("--key", help="API key override (skip codex auth resolution)")
-    parser.add_argument(
-        "--base-url",
-        help="override base URL; only the scheme+host is used",
-    )
+    parser.add_argument("--provider", help="只查询指定 provider")
+    parser.add_argument("--key", help="API key（跳过 codex 配置解析）")
+    parser.add_argument("--base-url", help="覆盖 base URL，仅取 scheme+host")
     parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
-        help=f"path to codex config.toml (default: {DEFAULT_CONFIG})",
+        help=f"codex config.toml 路径（默认：{DEFAULT_CONFIG}）",
     )
     parser.add_argument(
         "--auth",
         type=Path,
         default=DEFAULT_AUTH,
-        help=f"path to codex auth.json (default: {DEFAULT_AUTH})",
+        help=f"codex auth.json 路径（默认：{DEFAULT_AUTH}）",
     )
     parser.add_argument(
         "--json",
         dest="as_json",
         action="store_true",
-        help="output raw JSON (one object per provider, suitable for jq)",
+        help="输出原始 JSON（按 provider 一项；多项时输出数组）",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=15.0,
-        help="HTTP timeout in seconds (default: 15)",
+        help="HTTP 超时（秒，默认 15）",
+    )
+    parser.add_argument(
+        "--period",
+        choices=("daily", "monthly", "alltime", "all"),
+        default="all",
+        help="模型细分时段：daily / monthly / alltime / all（默认 all，三段都拉）",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=5,
+        help="文本输出每个时段展示前 N 个模型（默认 5；0 表示全部）",
+    )
+    parser.add_argument(
+        "--no-models",
+        dest="show_models",
+        action="store_false",
+        help="关闭模型细分查询",
     )
 
     args = parser.parse_args(argv)
 
-    # Manual override mode requires both --key and --base-url.
-    if args.key and not args.base_url:
-        # Still allow --key with codex config (will be applied to every provider).
-        pass
     if args.base_url and not args.key:
         print(
-            "warning: --base-url without --key still falls back to codex auth resolution",
+            "warning: --base-url 未配 --key 时仍会回退到 codex 配置解析",
             file=sys.stderr,
         )
 
@@ -341,21 +521,25 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         auth_data = load_json(args.auth)
 
-    try:
-        targets = build_targets(cfg, auth_data, args.provider, args.key, args.base_url)
-    except SystemExit:
-        raise
+    targets = build_targets(cfg, auth_data, args.provider, args.key, args.base_url)
 
     if not targets:
         print("error: no model_providers found in config", file=sys.stderr)
         return 2
+
+    if args.period == "all":
+        periods: tuple[str, ...] = PERIOD_ORDER
+    else:
+        periods = (args.period,)
+    if not args.show_models:
+        periods = ()
 
     exit_code = 0
     blocks: list[str] = []
     json_out: list[dict[str, Any]] = []
 
     for t in targets:
-        ok, result = query_one(t, args.timeout)
+        ok, result = fetch_all(t, periods, args.timeout)
         if args.as_json:
             entry: dict[str, Any] = {
                 "provider": t.name,
@@ -364,16 +548,18 @@ def main(argv: list[str] | None = None) -> int:
                 "key_source": t.key_source,
                 "ok": ok,
             }
-            if ok:
-                entry["data"] = result  # type: ignore[assignment]
+            if ok and isinstance(result, FetchResult):
+                entry["data"] = result.stats
+                entry["model_stats"] = result.model_stats
+                if result.errors:
+                    entry["model_stats_errors"] = result.errors
             else:
-                entry["error"] = result  # type: ignore[assignment]
-            json_out.append(entry)
-            if not ok:
+                entry["error"] = result if isinstance(result, str) else "unknown"
                 exit_code = 1
+            json_out.append(entry)
         else:
-            if ok:
-                blocks.append(render_text(t, result))  # type: ignore[arg-type]
+            if ok and isinstance(result, FetchResult):
+                blocks.append(render_text(t, result, periods, args.top, args.show_models))
             else:
                 blocks.append(render_error(t, str(result)))
                 exit_code = 1
