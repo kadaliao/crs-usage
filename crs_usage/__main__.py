@@ -253,6 +253,25 @@ def _format_int(n: int | float | None) -> str:
     return f"{int(n):,}"
 
 
+def _format_count(n: int | float | None, compact: bool = True) -> str:
+    """Token / 请求数格式化。compact=True 时用 K/M/B 单位。"""
+    if n is None:
+        return "-"
+    v = int(n)
+    if not compact:
+        return f"{v:,}"
+    if v < 1000:
+        return str(v)
+    if v < 1_000_000:
+        x = v / 1000
+        return f"{x:.1f}K" if x < 100 else f"{int(round(x))}K"
+    if v < 1_000_000_000:
+        x = v / 1_000_000
+        return f"{x:.1f}M" if x < 100 else f"{int(round(x))}M"
+    x = v / 1_000_000_000
+    return f"{x:.2f}B"
+
+
 def _format_pct(used: float | int | None, limit: float | int | None) -> str:
     if not limit or float(limit) <= 0:
         return f"{_format_money(used)}（无上限）"
@@ -305,27 +324,29 @@ def _pad(s: str, width: int, align: str = "left") -> str:
     return s + " " * diff
 
 
-def _render_model_table(models: list[dict[str, Any]], top: int) -> list[str]:
+def _render_model_table(
+    models: list[dict[str, Any]], top: int, compact: bool
+) -> list[str]:
     rows: list[tuple[str, str, str, str, str, str]] = [
-        ("模型", "请求", "Tokens", "输入/输出", "缓存读写", "费用")
+        ("模型", "请求", "Tokens", "输入/输出", "缓存写/读", "费用")
     ]
     shown = models[:top] if top > 0 else models
     for m in shown:
         model_name = str(m.get("model", "?"))
-        req = _format_int(m.get("requests"))
-        tokens = _format_int(m.get("allTokens"))
-        in_tok = _format_int(m.get("inputTokens"))
-        out_tok = _format_int(m.get("outputTokens"))
-        cc = _format_int(m.get("cacheCreateTokens"))
-        cr = _format_int(m.get("cacheReadTokens"))
+        req = _format_count(m.get("requests"), compact)
+        tokens = _format_count(m.get("allTokens"), compact)
+        in_tok = _format_count(m.get("inputTokens"), compact)
+        out_tok = _format_count(m.get("outputTokens"), compact)
+        cc = _format_count(m.get("cacheCreateTokens"), compact)
+        cr = _format_count(m.get("cacheReadTokens"), compact)
         cost = m.get("costs", {}).get("total")
         cost_str = _format_money_short(cost) if cost is not None else "-"
         rows.append((
             model_name,
             req,
             tokens,
-            f"{in_tok} / {out_tok}",
-            f"{cc} / {cr}",
+            f"{in_tok}/{out_tok}",
+            f"{cc}/{cr}",
             cost_str,
         ))
 
@@ -345,7 +366,7 @@ def _render_model_table(models: list[dict[str, Any]], top: int) -> list[str]:
             lines.append(sep)
 
     if top > 0 and len(models) > top:
-        lines.append(f"      （还有 {len(models) - top} 个模型未列出，可用 --top 查看更多）")
+        lines.append(f"      （还有 {len(models) - top} 个模型未列出，--top 0 显示全部）")
     return lines
 
 
@@ -355,6 +376,7 @@ def render_text(
     periods: tuple[str, ...],
     top: int,
     show_models: bool,
+    compact: bool,
 ) -> str:
     out: list[str] = []
     origin = origin_of(provider.base_url) if provider.base_url else "?"
@@ -379,12 +401,18 @@ def render_text(
     cc_tok = usage_total.get("cacheCreateTokens", 0) or 0
     cr_tok = usage_total.get("cacheReadTokens", 0) or 0
     all_tok = usage_total.get("allTokens") or (in_tok + out_tok + cc_tok + cr_tok)
-    out.append(f"    请求      {_format_int(usage_total.get('requests'))}")
-    out.append(f"    Tokens    {_format_int(all_tok)}")
-    out.append(f"              输入 {_format_int(in_tok)} / 输出 {_format_int(out_tok)}")
-    out.append(f"              缓存创建 {_format_int(cc_tok)} / 读取 {_format_int(cr_tok)}")
     cost = usage_total.get("cost")
-    out.append(f"    费用      {_format_money(cost)}")
+    out.append(
+        f"    请求 {_format_count(usage_total.get('requests'), compact)}    "
+        f"Tokens {_format_count(all_tok, compact)}    "
+        f"费用 {_format_money(cost)}"
+    )
+    out.append(
+        f"    输入 {_format_count(in_tok, compact)} / "
+        f"输出 {_format_count(out_tok, compact)} / "
+        f"缓存创建 {_format_count(cc_tok, compact)} / "
+        f"缓存读取 {_format_count(cr_tok, compact)}"
+    )
 
     out.append("")
     out.append("  💰 限额")
@@ -437,7 +465,7 @@ def render_text(
                 out.append(f"    [{label}]  无数据")
                 continue
             out.append(f"    [{label}]  {count} 个模型")
-            out.extend(_render_model_table(models, top))
+            out.extend(_render_model_table(models, top, compact))
 
     return "\n".join(out)
 
@@ -501,6 +529,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="关闭模型细分查询",
     )
+    parser.add_argument(
+        "--wide",
+        action="store_true",
+        help="文本输出使用完整数字（默认按 K/M/B 紧凑显示）",
+    )
 
     args = parser.parse_args(argv)
 
@@ -559,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
             json_out.append(entry)
         else:
             if ok and isinstance(result, FetchResult):
-                blocks.append(render_text(t, result, periods, args.top, args.show_models))
+                blocks.append(render_text(t, result, periods, args.top, args.show_models, not args.wide))
             else:
                 blocks.append(render_error(t, str(result)))
                 exit_code = 1
