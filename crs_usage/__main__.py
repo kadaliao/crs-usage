@@ -547,15 +547,37 @@ def run_codex_flow(args: argparse.Namespace) -> int:
     return exit_code
 
 
-def main(argv: list[str] | None = None) -> int:
+# ===== CLI subparsers & entry =====
+
+def cmd_admin_tui(args: argparse.Namespace) -> int:
+    print("admin TUI not implemented yet", file=sys.stderr)
+    return 2
+
+
+def cmd_admin_setup(args: argparse.Namespace) -> int:
+    print("admin setup not implemented yet", file=sys.stderr)
+    return 2
+
+
+def cmd_admin_print(args: argparse.Namespace) -> int:
+    print(f"admin print --view {args.view} not implemented yet", file=sys.stderr)
+    return 2
+
+
+def cmd_admin_profiles(args: argparse.Namespace) -> int:
+    print(f"admin profiles {args.profile_action} not implemented yet", file=sys.stderr)
+    return 2
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crs-usage",
         description=(
             "通过本地 Codex 配置查询 claude-relay-service 用量、限额与模型细分。"
-            "读取 ~/.codex/config.toml，向 {base_origin}/apiStats/api/user-stats "
-            "和 user-model-stats 发起请求。"
+            "裸跑读取 ~/.codex/config.toml；admin 子命令用账号密码登录查询 /admin/*。"
         ),
     )
+    # 现有 flag（裸跑模式用）
     parser.add_argument("--provider", help="只查询指定 provider")
     parser.add_argument("--key", help="API key（跳过 codex 配置解析）")
     parser.add_argument("--base-url", help="覆盖 base URL，仅取 scheme+host")
@@ -564,20 +586,58 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auth", type=Path, default=DEFAULT_AUTH,
                         help=f"codex auth.json 路径（默认：{DEFAULT_AUTH}）")
     parser.add_argument("--json", dest="as_json", action="store_true",
-                        help="输出原始 JSON（按 provider 一项；多项时输出数组）")
+                        help="输出原始 JSON")
     parser.add_argument("--timeout", type=float, default=15.0,
                         help="HTTP 超时（秒，默认 15）")
     parser.add_argument("--period", choices=("daily", "monthly", "alltime", "all"),
-                        default="all",
-                        help="模型细分时段：daily / monthly / alltime / all（默认 all，三段都拉）")
+                        default="all", help="模型细分时段：daily / monthly / alltime / all（默认 all，三段都拉）")
     parser.add_argument("--top", type=int, default=5,
-                        help="文本输出每个时段展示前 N 个模型（默认 5；0 表示全部）")
+                        help="每个时段展示前 N 个模型（0 = 全部）")
     parser.add_argument("--no-models", dest="show_models", action="store_false",
                         help="关闭模型细分查询")
-    parser.add_argument("--wide", action="store_true",
-                        help="文本输出使用完整数字（默认按 K/M/B 紧凑显示）")
+    parser.add_argument("--wide", action="store_true", help="文本输出完整数字")
+
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    admin_p = subparsers.add_parser("admin", help="管理员视图（登录 CRS /admin/*）")
+    admin_sub = admin_p.add_subparsers(dest="admin_cmd")
+    admin_p.set_defaults(func=cmd_admin_tui)
+
+    setup_p = admin_sub.add_parser("setup", help="交互式登录并写入 profile")
+    setup_p.add_argument("--profile", default="default", help="profile 名（默认 default）")
+    setup_p.set_defaults(func=cmd_admin_setup)
+
+    print_p = admin_sub.add_parser("print", help="非交互输出")
+    print_p.add_argument("--view", required=True,
+                         choices=("dashboard", "api-keys", "accounts"))
+    print_p.add_argument("--profile", help="profile 名（默认用 admin_default）")
+    print_p.add_argument("--type", choices=("claude", "openai", "gemini", "droid"),
+                         default="claude",
+                         help="账号类型（仅 --view accounts 使用，默认 claude）")
+    print_p.add_argument("--json", dest="as_json", action="store_true",
+                         help="输出原始 JSON")
+    print_p.set_defaults(func=cmd_admin_print)
+
+    profiles_p = admin_sub.add_parser("profiles", help="管理 admin profile")
+    profiles_sub = profiles_p.add_subparsers(dest="profile_action", required=True)
+    list_p = profiles_sub.add_parser("list", help="列出所有 admin profile")
+    list_p.set_defaults(func=cmd_admin_profiles)
+    use_p = profiles_sub.add_parser("use", help="切换默认 admin profile")
+    use_p.add_argument("name")
+    use_p.set_defaults(func=cmd_admin_profiles)
+    remove_p = profiles_sub.add_parser("remove", help="删除 admin profile")
+    remove_p.add_argument("name")
+    remove_p.set_defaults(func=cmd_admin_profiles)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
-    return run_codex_flow(args)
+    if args.cmd is None:
+        return run_codex_flow(args)
+    return args.func(args)
 
 
 if __name__ == "__main__":
