@@ -955,7 +955,9 @@ class AdminTUI(App):
             with Vertical(id="dashboard"):
                 yield Static("loading...", id="dash-summary")
                 yield DataTable(id="dash-models")
-            yield Static("loading api-keys...", id="api-keys")
+            with Vertical(id="api-keys"):
+                yield Static("loading...", id="keys-status")
+                yield DataTable(id="keys-table")
             yield Static("loading accounts...", id="accounts")
             yield Static("loading trend...", id="trend")
         yield Footer()
@@ -1017,10 +1019,41 @@ class AdminTUI(App):
                 _format_money_short(_safe(m, "costs", "total")),
             )
 
+    def _refresh_api_keys(self) -> None:
+        status = self.query_one("#keys-status", Static)
+        table = self.query_one("#keys-table", DataTable)
+        status.update("loading...")
+        ok, payload = _safe_call(self.client.api_keys)
+        if not ok:
+            status.update(f"❌ {payload}")
+            return
+        keys = _safe(payload, "data") or payload.get("apiKeys") or []
+        status.update(f"共 {len(keys)} 个 API Key")
+        table.clear(columns=True)
+        table.add_columns(
+            "名称", "状态", "今日请求", "今日 Tokens", "今日费用", "限额(日)", "到期",
+        )
+        for k in keys:
+            today = k.get("todayUsage") or k.get("usage") or {}
+            daily_lim = k.get("dailyCostLimit") or 0
+            table.add_row(
+                str(k.get("name") or k.get("id") or "?"),
+                "启用" if k.get("isActive") else "禁用",
+                _format_count(today.get("requests")),
+                _format_count(today.get("allTokens") or today.get("tokens")),
+                _format_money_short(today.get("cost")),
+                _format_money_short(daily_lim) if daily_lim else "∞",
+                str(k.get("expiresAt") or "永不"),
+            )
+
+
     def refresh_current(self) -> None:
         v = self.current_view
         if v == "dashboard":
             self._refresh_dashboard()
+        elif v == "api-keys":
+            self._refresh_api_keys()
+
 
 
 # ===== CLI subparsers & entry =====
