@@ -183,6 +183,8 @@ def _safe_call(fn, *args) -> tuple[bool, Any]:
         return False, f"timeout: {e}"
     except json.JSONDecodeError as e:
         return False, f"invalid JSON response: {e}"
+    except AdminAuthError as e:
+        return False, f"auth error: {e}"
 
 
 def fetch_all(
@@ -918,7 +920,7 @@ def render_accounts_table(account_type: str, payload: dict[str, Any]) -> str:
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
+from textual.containers import Vertical
 from textual.widgets import Header, Footer, Static, DataTable, ContentSwitcher, Tabs, Tab, Sparkline
 
 
