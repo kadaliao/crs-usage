@@ -919,7 +919,7 @@ def render_accounts_table(account_type: str, payload: dict[str, Any]) -> str:
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
-from textual.widgets import Header, Footer, Static, DataTable, ContentSwitcher, Tabs, Tab
+from textual.widgets import Header, Footer, Static, DataTable, ContentSwitcher, Tabs, Tab, Sparkline
 
 
 class AdminTUI(App):
@@ -969,7 +969,15 @@ class AdminTUI(App):
                 )
                 yield Static("loading...", id="acc-status")
                 yield DataTable(id="acc-table")
-            yield Static("loading trend...", id="trend")
+            with Vertical(id="trend"):
+                yield Static("loading...", id="trend-status")
+                yield Static("请求", id="trend-req-label")
+                yield Sparkline([], id="trend-req")
+                yield Static("Tokens", id="trend-tok-label")
+                yield Sparkline([], id="trend-tok")
+                yield Static("费用", id="trend-cost-label")
+                yield Sparkline([], id="trend-cost")
+                yield DataTable(id="trend-table")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1101,6 +1109,36 @@ class AdminTUI(App):
                 win_cell,
             )
 
+    def _refresh_trend(self) -> None:
+        status = self.query_one("#trend-status", Static)
+        status.update("loading...")
+        ok, payload = _safe_call(self.client.usage_trend, 7)
+        if not ok:
+            status.update(f"❌ {payload}")
+            return
+        rows = _safe(payload, "data") or payload.get("trend") or []
+        if not isinstance(rows, list):
+            rows = []
+        status.update(f"过去 {len(rows)} 天")
+
+        reqs = [float(r.get("requests") or 0) for r in rows]
+        toks = [float(r.get("tokens") or r.get("allTokens") or 0) for r in rows]
+        costs = [float(r.get("cost") or 0) for r in rows]
+        self.query_one("#trend-req", Sparkline).data = reqs
+        self.query_one("#trend-tok", Sparkline).data = toks
+        self.query_one("#trend-cost", Sparkline).data = costs
+
+        table = self.query_one("#trend-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("日期", "请求", "Tokens", "费用")
+        for r in rows:
+            table.add_row(
+                str(r.get("date") or r.get("day") or "?"),
+                _format_count(r.get("requests")),
+                _format_count(r.get("tokens") or r.get("allTokens")),
+                _format_money_short(r.get("cost")),
+            )
+
     def refresh_current(self) -> None:
         v = self.current_view
         if v == "dashboard":
@@ -1109,6 +1147,8 @@ class AdminTUI(App):
             self._refresh_api_keys()
         elif v == "accounts":
             self._refresh_accounts()
+        elif v == "trend":
+            self._refresh_trend()
 
 
 
