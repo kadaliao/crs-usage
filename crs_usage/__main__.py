@@ -475,68 +475,7 @@ def render_error(provider: ProviderTarget, message: str) -> str:
     return f"■ {provider.name}  {origin}  错误：{message}"
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="crs-usage",
-        description=(
-            "通过本地 Codex 配置查询 claude-relay-service 用量、限额与模型细分。"
-            "读取 ~/.codex/config.toml，向 {base_origin}/apiStats/api/user-stats "
-            "和 user-model-stats 发起请求。"
-        ),
-    )
-    parser.add_argument("--provider", help="只查询指定 provider")
-    parser.add_argument("--key", help="API key（跳过 codex 配置解析）")
-    parser.add_argument("--base-url", help="覆盖 base URL，仅取 scheme+host")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_CONFIG,
-        help=f"codex config.toml 路径（默认：{DEFAULT_CONFIG}）",
-    )
-    parser.add_argument(
-        "--auth",
-        type=Path,
-        default=DEFAULT_AUTH,
-        help=f"codex auth.json 路径（默认：{DEFAULT_AUTH}）",
-    )
-    parser.add_argument(
-        "--json",
-        dest="as_json",
-        action="store_true",
-        help="输出原始 JSON（按 provider 一项；多项时输出数组）",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=15.0,
-        help="HTTP 超时（秒，默认 15）",
-    )
-    parser.add_argument(
-        "--period",
-        choices=("daily", "monthly", "alltime", "all"),
-        default="all",
-        help="模型细分时段：daily / monthly / alltime / all（默认 all，三段都拉）",
-    )
-    parser.add_argument(
-        "--top",
-        type=int,
-        default=5,
-        help="文本输出每个时段展示前 N 个模型（默认 5；0 表示全部）",
-    )
-    parser.add_argument(
-        "--no-models",
-        dest="show_models",
-        action="store_false",
-        help="关闭模型细分查询",
-    )
-    parser.add_argument(
-        "--wide",
-        action="store_true",
-        help="文本输出使用完整数字（默认按 K/M/B 紧凑显示）",
-    )
-
-    args = parser.parse_args(argv)
-
+def run_codex_flow(args: argparse.Namespace) -> int:
     if args.base_url and not args.key:
         print(
             "warning: --base-url 未配 --key 时仍会回退到 codex 配置解析",
@@ -606,6 +545,39 @@ def main(argv: list[str] | None = None) -> int:
         print("\n\n".join(blocks))
 
     return exit_code
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="crs-usage",
+        description=(
+            "通过本地 Codex 配置查询 claude-relay-service 用量、限额与模型细分。"
+            "读取 ~/.codex/config.toml，向 {base_origin}/apiStats/api/user-stats "
+            "和 user-model-stats 发起请求。"
+        ),
+    )
+    parser.add_argument("--provider", help="只查询指定 provider")
+    parser.add_argument("--key", help="API key（跳过 codex 配置解析）")
+    parser.add_argument("--base-url", help="覆盖 base URL，仅取 scheme+host")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                        help=f"codex config.toml 路径（默认：{DEFAULT_CONFIG}）")
+    parser.add_argument("--auth", type=Path, default=DEFAULT_AUTH,
+                        help=f"codex auth.json 路径（默认：{DEFAULT_AUTH}）")
+    parser.add_argument("--json", dest="as_json", action="store_true",
+                        help="输出原始 JSON（按 provider 一项；多项时输出数组）")
+    parser.add_argument("--timeout", type=float, default=15.0,
+                        help="HTTP 超时（秒，默认 15）")
+    parser.add_argument("--period", choices=("daily", "monthly", "alltime", "all"),
+                        default="all",
+                        help="模型细分时段：daily / monthly / alltime / all（默认 all，三段都拉）")
+    parser.add_argument("--top", type=int, default=5,
+                        help="文本输出每个时段展示前 N 个模型（默认 5；0 表示全部）")
+    parser.add_argument("--no-models", dest="show_models", action="store_false",
+                        help="关闭模型细分查询")
+    parser.add_argument("--wide", action="store_true",
+                        help="文本输出使用完整数字（默认按 K/M/B 紧凑显示）")
+    args = parser.parse_args(argv)
+    return run_codex_flow(args)
 
 
 if __name__ == "__main__":
