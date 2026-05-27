@@ -547,6 +547,71 @@ def run_codex_flow(args: argparse.Namespace) -> int:
     return exit_code
 
 
+# ===== Admin: Config & Profile =====
+
+ADMIN_CONFIG_DIR = Path(
+    os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+) / "crs-usage"
+ADMIN_CONFIG_PATH = ADMIN_CONFIG_DIR / "config.json"
+
+
+def load_admin_config() -> dict[str, Any]:
+    """读取 admin config；不存在返回空 dict。"""
+    if not ADMIN_CONFIG_PATH.exists():
+        return {}
+    with ADMIN_CONFIG_PATH.open("rb") as f:
+        return json.load(f)
+
+
+def save_admin_config(cfg: dict[str, Any]) -> None:
+    """写回 admin config，文件权限 600。"""
+    ADMIN_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = ADMIN_CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(ADMIN_CONFIG_PATH)
+
+
+def resolve_admin_profile(
+    cfg: dict[str, Any], name: str | None
+) -> tuple[str, dict[str, Any]]:
+    """返回 (profile_name, profile_dict)；找不到时抛 SystemExit。"""
+    profiles = cfg.get("admin_profiles") or {}
+    if not profiles:
+        raise SystemExit(
+            "error: 未配置任何 admin profile，先运行 `crs-usage admin setup`"
+        )
+    if name:
+        if name not in profiles:
+            raise SystemExit(
+                f"error: profile {name!r} 不存在；"
+                f"已有：{', '.join(profiles) or '(none)'}"
+            )
+        return name, profiles[name]
+    default = cfg.get("admin_default")
+    if default and default in profiles:
+        return default, profiles[default]
+    if len(profiles) == 1:
+        only = next(iter(profiles))
+        return only, profiles[only]
+    raise SystemExit(
+        f"error: 未指定 --profile 且无默认；"
+        f"用 `crs-usage admin profiles use NAME` 设置默认，"
+        f"已有：{', '.join(profiles)}"
+    )
+
+
+def update_admin_profile(
+    name: str, patch: dict[str, Any]
+) -> None:
+    """合并 patch 到指定 profile 并写回。"""
+    cfg = load_admin_config()
+    profiles = cfg.setdefault("admin_profiles", {})
+    profile = profiles.setdefault(name, {})
+    profile.update(patch)
+    save_admin_config(cfg)
+
+
 # ===== CLI subparsers & entry =====
 
 def cmd_admin_tui(args: argparse.Namespace) -> int:
