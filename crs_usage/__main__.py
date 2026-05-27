@@ -771,6 +771,75 @@ def build_admin_client(
     return name, AdminClient(profile, timeout=timeout, on_token_refresh=_persist)
 
 
+# ===== Admin: Formatters & Print =====
+
+def _safe(d: dict[str, Any] | None, *keys: str, default: Any = None) -> Any:
+    cur: Any = d or {}
+    for k in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(k)
+        if cur is None:
+            return default
+    return cur
+
+
+def render_admin_dashboard(
+    client_name: str,
+    base_url: str,
+    dash: dict[str, Any],
+    models: dict[str, Any],
+    accounts_stats: dict[str, Any] | None,
+    top: int = 5,
+) -> str:
+    out: list[str] = []
+    origin = origin_of(base_url)
+    out.append(f"■ {client_name}  {origin}  admin")
+
+    data = _safe(dash, "data") or dash or {}
+    rpm = _safe(data, "realtimeRPM", default=0) or _safe(data, "rpm", default=0)
+    tpm = _safe(data, "realtimeTPM", default=0) or _safe(data, "tpm", default=0)
+    today_req = _safe(data, "todayRequests", default=0) or _safe(data, "today", "requests", default=0)
+    today_tokens = _safe(data, "todayTokens", default=0) or _safe(data, "today", "tokens", default=0)
+    today_cost = _safe(data, "todayCost", default=0) or _safe(data, "today", "cost", default=0)
+
+    out.append("")
+    out.append("  📊 实时")
+    out.append(
+        f"    RPM {_format_count(rpm)}    TPM {_format_count(tpm)}    "
+        f"今日请求 {_format_count(today_req)}    今日费用 {_format_money(today_cost)}"
+    )
+    out.append(f"    今日 Tokens {_format_count(today_tokens)}")
+
+    active_keys = _safe(data, "activeApiKeys", default=None)
+    total_keys = _safe(data, "totalApiKeys", default=None)
+    if active_keys is not None or total_keys is not None:
+        out.append("")
+        out.append(
+            f"  🔑 API Keys  活跃 {_format_count(active_keys)} / "
+            f"总数 {_format_count(total_keys)}"
+        )
+
+    acc_data = _safe(accounts_stats, "data") if accounts_stats else None
+    if isinstance(acc_data, dict):
+        normal = acc_data.get("normal", 0)
+        abnormal = acc_data.get("abnormal", 0)
+        rate_limited = acc_data.get("rateLimited", 0)
+        overloaded = acc_data.get("overloaded", 0)
+        out.append(
+            f"  🛠 上游账号  正常 {normal} / 异常 {abnormal} / "
+            f"限流 {rate_limited} / 过载 {overloaded}"
+        )
+
+    model_data = _safe(models, "data", default=[]) or []
+    if isinstance(model_data, list) and model_data:
+        out.append("")
+        out.append(f"  🧠 今日热门模型 (Top {top})")
+        out.extend(_render_model_table(model_data, top, compact=True))
+
+    return "\n".join(out)
+
+
 # ===== CLI subparsers & entry =====
 
 def cmd_admin_tui(args: argparse.Namespace) -> int:
@@ -828,8 +897,49 @@ def cmd_admin_setup(args: argparse.Namespace) -> int:
 
 
 def cmd_admin_print(args: argparse.Namespace) -> int:
-    print(f"admin print --view {args.view} not implemented yet", file=sys.stderr)
-    return 2
+    try:
+        name, client = build_admin_client(args.profile)
+    except SystemExit:
+        raise
+    except (KeyError, AdminAuthError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    view = args.view
+    try:
+        if view == "dashboard":
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                f_dash = ex.submit(_safe_call, client.dashboard)
+                f_models = ex.submit(_safe_call, client.model_stats, "daily")
+                f_accs = ex.submit(_safe_call, client.accounts_usage_stats)
+                ok_d, dash = f_dash.result()
+                ok_m, models = f_models.result()
+                ok_a, accs = f_accs.result()
+            if not ok_d:
+                print(f"error: dashboard 失败：{dash}", file=sys.stderr)
+                return 1
+            models_payload = models if ok_m else {"data": []}
+            accs_payload = accs if ok_a else None
+            if args.as_json:
+                print(json.dumps({
+                    "profile": name,
+                    "base_url": client.profile.base_url,
+                    "dashboard": dash,
+                    "model_stats": models_payload,
+                    "accounts_usage_stats": accs_payload,
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(render_admin_dashboard(
+                    name, client.profile.base_url, dash, models_payload,
+                    accs_payload, top=5,
+                ))
+            return 0
+        # 其他 view 后续 Task 实现
+        print(f"view {view!r} not implemented yet", file=sys.stderr)
+        return 2
+    except AdminAuthError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_admin_profiles(args: argparse.Namespace) -> int:
