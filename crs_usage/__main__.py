@@ -721,6 +721,55 @@ class AdminClient:
                     ) from e2
             raise
 
+    def dashboard(self) -> dict[str, Any]:
+        return self._get("/admin/dashboard")
+
+    def model_stats(self, period: str = "daily") -> dict[str, Any]:
+        return self._get("/admin/model-stats", {"period": period})
+
+    def api_keys(self) -> dict[str, Any]:
+        return self._get("/admin/api-keys")
+
+    def accounts(self, account_type: str) -> dict[str, Any]:
+        type_map = {
+            "claude": "/admin/claude-accounts",
+            "openai": "/admin/openai-accounts",
+            "gemini": "/admin/gemini-accounts",
+            "droid": "/admin/droid-accounts",
+        }
+        path = type_map.get(account_type)
+        if not path:
+            raise ValueError(f"unknown account type: {account_type}")
+        return self._get(path)
+
+    def accounts_usage_stats(self) -> dict[str, Any]:
+        return self._get("/admin/accounts/usage-stats")
+
+    def usage_trend(self, days: int = 7) -> dict[str, Any]:
+        return self._get("/admin/usage-trend", {"days": str(days)})
+
+
+def build_admin_client(
+    profile_name: str | None,
+    timeout: float = 15.0,
+) -> tuple[str, AdminClient]:
+    """从 config 加载 profile 并构造 client；token 刷新时自动写回 config。"""
+    cfg = load_admin_config()
+    name, p = resolve_admin_profile(cfg, profile_name)
+    profile = AdminProfile(
+        name=name,
+        base_url=p["base_url"],
+        username=p["username"],
+        password=p["password"],
+        token=p.get("token"),
+        token_expires_at=p.get("token_expires_at"),
+    )
+
+    def _persist(tok: str, exp: int) -> None:
+        update_admin_profile(name, {"token": tok, "token_expires_at": exp})
+
+    return name, AdminClient(profile, timeout=timeout, on_token_refresh=_persist)
+
 
 # ===== CLI subparsers & entry =====
 
