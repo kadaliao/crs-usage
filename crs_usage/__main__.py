@@ -875,6 +875,45 @@ def render_api_keys_table(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_accounts_table(account_type: str, payload: dict[str, Any]) -> str:
+    accs = _safe(payload, "data") or payload.get("accounts") or []
+    if not isinstance(accs, list) or not accs:
+        return f"(无 {account_type} 账号)"
+
+    rows: list[tuple[str, str, str, str, str, str]] = [
+        ("名称", "状态", "今日请求", "今日 Tokens", "今日费用", "5h 窗口/限额"),
+    ]
+    for a in accs:
+        name = str(a.get("name") or a.get("email") or a.get("id") or "?")
+        status = str(a.get("status") or "-")
+        today = a.get("todayUsage") or a.get("usage") or {}
+        req = _format_count(today.get("requests"))
+        tokens = _format_count(today.get("allTokens") or today.get("tokens"))
+        cost = _format_money_short(today.get("cost"))
+        win_cost = a.get("currentWindowCost")
+        win_lim = a.get("windowCostLimit") or a.get("rateLimitCost")
+        if win_cost is not None or win_lim:
+            cost_s = _format_money_short(win_cost) if win_cost is not None else "-"
+            lim_s = _format_money_short(win_lim) if win_lim else "∞"
+            win_cell = f"{cost_s} / {lim_s}"
+        else:
+            win_cell = "-"
+        rows.append((name, status, req, tokens, cost, win_cell))
+
+    widths = [0] * 6
+    for row in rows:
+        for i, c in enumerate(row):
+            widths[i] = max(widths[i], _display_width(c))
+    aligns = ("left", "left", "right", "right", "right", "right")
+    lines: list[str] = []
+    for idx, row in enumerate(rows):
+        cells = [_pad(c, widths[i], aligns[i]) for i, c in enumerate(row)]
+        lines.append("  ".join(cells))
+        if idx == 0:
+            lines.append("  ".join("─" * widths[i] for i in range(6)))
+    return "\n".join(lines)
+
+
 # ===== CLI subparsers & entry =====
 
 def cmd_admin_tui(args: argparse.Namespace) -> int:
@@ -985,7 +1024,24 @@ def cmd_admin_print(args: argparse.Namespace) -> int:
                 print()
                 print(render_api_keys_table(payload))
             return 0
-        # 其他 view 后续 Task 实现
+        if view == "accounts":
+            ok, payload = _safe_call(client.accounts, args.type)
+            if not ok:
+                print(f"error: accounts({args.type}) 失败：{payload}", file=sys.stderr)
+                return 1
+            if args.as_json:
+                print(json.dumps({
+                    "profile": name,
+                    "base_url": client.profile.base_url,
+                    "account_type": args.type,
+                    "accounts": payload,
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(f"■ {name}  {origin_of(client.profile.base_url)}  "
+                      f"admin / accounts / {args.type}")
+                print()
+                print(render_accounts_table(args.type, payload))
+            return 0
         print(f"view {view!r} not implemented yet", file=sys.stderr)
         return 2
     except AdminAuthError as e:
