@@ -730,8 +730,52 @@ def cmd_admin_tui(args: argparse.Namespace) -> int:
 
 
 def cmd_admin_setup(args: argparse.Namespace) -> int:
-    print("admin setup not implemented yet", file=sys.stderr)
-    return 2
+    cfg = load_admin_config()
+    profiles = cfg.get("admin_profiles") or {}
+    name = args.profile
+    existing = profiles.get(name) or {}
+
+    default_base = existing.get("base_url") or "https://cc.aihezu.dev"
+    default_user = existing.get("username") or ""
+
+    base_url = input(f"CRS base URL [{default_base}]: ").strip() or default_base
+    username = input(f"admin username [{default_user}]: ").strip() or default_user
+    if not username:
+        print("error: username 必填", file=sys.stderr)
+        return 2
+    import getpass
+    password = getpass.getpass("admin password: ")
+    if not password:
+        print("error: password 必填", file=sys.stderr)
+        return 2
+
+    profile = AdminProfile(
+        name=name, base_url=base_url,
+        username=username, password=password,
+    )
+    client = AdminClient(profile)
+    try:
+        client.login()
+    except AdminAuthError as e:
+        print(f"error: 登录失败：{e}", file=sys.stderr)
+        return 1
+
+    entry = {
+        "base_url": base_url,
+        "username": username,
+        "password": password,
+        "token": profile.token,
+        "token_expires_at": profile.token_expires_at,
+    }
+    update_admin_profile(name, entry)
+    # 第一次 setup 时也把 default 指过来
+    cfg = load_admin_config()
+    if not cfg.get("admin_default"):
+        cfg["admin_default"] = name
+        save_admin_config(cfg)
+    print(f"✅ profile {name!r} saved to {ADMIN_CONFIG_PATH}")
+    print(f"   token expires at: {profile.token_expires_at or 'unknown'}")
+    return 0
 
 
 def cmd_admin_print(args: argparse.Namespace) -> int:
