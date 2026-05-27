@@ -944,6 +944,7 @@ class AdminTUI(App):
         self.profile_name = profile_name
         self.client = client
         self.current_view = "dashboard"
+        self.current_account_type = "claude"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -958,7 +959,16 @@ class AdminTUI(App):
             with Vertical(id="api-keys"):
                 yield Static("loading...", id="keys-status")
                 yield DataTable(id="keys-table")
-            yield Static("loading accounts...", id="accounts")
+            with Vertical(id="accounts"):
+                yield Tabs(
+                    Tab("Claude", id="tab-claude"),
+                    Tab("OpenAI", id="tab-openai"),
+                    Tab("Gemini", id="tab-gemini"),
+                    Tab("Droid", id="tab-droid"),
+                    id="acc-tabs",
+                )
+                yield Static("loading...", id="acc-status")
+                yield DataTable(id="acc-table")
             yield Static("loading trend...", id="trend")
         yield Footer()
 
@@ -1047,12 +1057,58 @@ class AdminTUI(App):
             )
 
 
+    def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
+        if event.tab is None:
+            return
+        mapping = {"tab-claude": "claude", "tab-openai": "openai",
+                   "tab-gemini": "gemini", "tab-droid": "droid"}
+        new_type = mapping.get(event.tab.id or "")
+        if new_type and new_type != self.current_account_type:
+            self.current_account_type = new_type
+            if self.current_view == "accounts":
+                self._refresh_accounts()
+
+    def _refresh_accounts(self) -> None:
+        status = self.query_one("#acc-status", Static)
+        table = self.query_one("#acc-table", DataTable)
+        status.update(f"loading {self.current_account_type}...")
+        ok, payload = _safe_call(self.client.accounts, self.current_account_type)
+        if not ok:
+            status.update(f"❌ {payload}")
+            return
+        accs = _safe(payload, "data") or payload.get("accounts") or []
+        status.update(f"{self.current_account_type}: 共 {len(accs)} 个账号")
+        table.clear(columns=True)
+        table.add_columns(
+            "名称", "状态", "今日请求", "今日 Tokens", "今日费用", "5h 窗口/限额",
+        )
+        for a in accs:
+            today = a.get("todayUsage") or a.get("usage") or {}
+            win_cost = a.get("currentWindowCost")
+            win_lim = a.get("windowCostLimit") or a.get("rateLimitCost")
+            if win_cost is not None or win_lim:
+                cost_s = _format_money_short(win_cost) if win_cost is not None else "-"
+                lim_s = _format_money_short(win_lim) if win_lim else "∞"
+                win_cell = f"{cost_s} / {lim_s}"
+            else:
+                win_cell = "-"
+            table.add_row(
+                str(a.get("name") or a.get("email") or a.get("id") or "?"),
+                str(a.get("status") or "-"),
+                _format_count(today.get("requests")),
+                _format_count(today.get("allTokens") or today.get("tokens")),
+                _format_money_short(today.get("cost")),
+                win_cell,
+            )
+
     def refresh_current(self) -> None:
         v = self.current_view
         if v == "dashboard":
             self._refresh_dashboard()
         elif v == "api-keys":
             self._refresh_api_keys()
+        elif v == "accounts":
+            self._refresh_accounts()
 
 
 
