@@ -612,6 +612,116 @@ def update_admin_profile(
     save_admin_config(cfg)
 
 
+# ===== Admin: Client =====
+
+import time
+from typing import Callable
+
+LOGIN_PATH = "/web/auth/login"
+
+
+@dataclass
+class AdminProfile:
+    name: str
+    base_url: str
+    username: str
+    password: str
+    token: str | None = None
+    token_expires_at: int | None = None
+
+
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float,
+) -> dict[str, Any]:
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    hdrs = {"User-Agent": "crs-usage/0.3"}
+    if data is not None:
+        hdrs["Content-Type"] = "application/json"
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body_text = resp.read().decode("utf-8", errors="replace")
+    return json.loads(body_text)
+
+
+class AdminAuthError(Exception):
+    """Login failed or token rejected after retry."""
+
+
+class AdminClient:
+    def __init__(
+        self,
+        profile: AdminProfile,
+        *,
+        timeout: float = 15.0,
+        on_token_refresh: Callable[[str, int], None] | None = None,
+    ):
+        self.profile = profile
+        self.timeout = timeout
+        self.on_token_refresh = on_token_refresh
+        self._origin = origin_of(profile.base_url)
+
+    def login(self) -> None:
+        url = f"{self._origin}{LOGIN_PATH}"
+        try:
+            payload = _request_json(
+                "POST", url,
+                body={"username": self.profile.username,
+                      "password": self.profile.password},
+                timeout=self.timeout,
+            )
+        except urllib.error.HTTPError as e:
+            raise AdminAuthError(_humanize_http_error(e)) from e
+        except urllib.error.URLError as e:
+            raise AdminAuthError(f"connection error: {e.reason}") from e
+        if not payload.get("success"):
+            msg = payload.get("message") or payload.get("error") or "login failed"
+            raise AdminAuthError(str(msg))
+        token = payload.get("token")
+        if not token:
+            raise AdminAuthError("login response missing token")
+        expires_in = int(payload.get("expiresIn") or 0)
+        expires_at = int(time.time()) + max(expires_in - 60, 60) if expires_in else None
+        self.profile.token = token
+        self.profile.token_expires_at = expires_at
+        if self.on_token_refresh:
+            self.on_token_refresh(token, expires_at or 0)
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self.profile.token:
+            self.login()
+        url = f"{self._origin}{path}"
+        if params:
+            from urllib.parse import urlencode
+            url = f"{url}?{urlencode(params)}"
+
+        def _do() -> dict[str, Any]:
+            return _request_json(
+                "GET", url,
+                headers={"Authorization": f"Bearer {self.profile.token}"},
+                timeout=self.timeout,
+            )
+
+        try:
+            return _do()
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                self.login()
+                try:
+                    return _do()
+                except urllib.error.HTTPError as e2:
+                    raise AdminAuthError(
+                        f"401 after re-login: {_humanize_http_error(e2)}"
+                    ) from e2
+            raise
+
+
 # ===== CLI subparsers & entry =====
 
 def cmd_admin_tui(args: argparse.Namespace) -> int:
