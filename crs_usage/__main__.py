@@ -952,7 +952,9 @@ class AdminTUI(App):
             id="status",
         )
         with ContentSwitcher(initial="dashboard", id="view"):
-            yield Static("loading dashboard...", id="dashboard")
+            with Vertical(id="dashboard"):
+                yield Static("loading...", id="dash-summary")
+                yield DataTable(id="dash-models")
             yield Static("loading api-keys...", id="api-keys")
             yield Static("loading accounts...", id="accounts")
             yield Static("loading trend...", id="trend")
@@ -969,9 +971,56 @@ class AdminTUI(App):
     def action_refresh_view(self) -> None:
         self.refresh_current()
 
+    def _refresh_dashboard(self) -> None:
+        summary = self.query_one("#dash-summary", Static)
+        table = self.query_one("#dash-models", DataTable)
+        summary.update("loading...")
+        try:
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                f_dash = ex.submit(_safe_call, self.client.dashboard)
+                f_models = ex.submit(_safe_call, self.client.model_stats, "daily")
+                f_accs = ex.submit(_safe_call, self.client.accounts_usage_stats)
+                ok_d, dash = f_dash.result()
+                ok_m, models = f_models.result()
+                ok_a, accs = f_accs.result()
+        except Exception as e:
+            summary.update(f"❌ {e}")
+            return
+        if not ok_d:
+            summary.update(f"❌ dashboard 失败：{dash}")
+            return
+        models_payload = models if ok_m else {"data": []}
+        accs_payload = accs if ok_a else None
+
+        # 复用 print 用的渲染函数，去掉首行 ■ 标头（已在顶部 status 显示）
+        # 以及 🧠 模型表（下方 DataTable 单独画）
+        text = render_admin_dashboard(
+            self.profile_name, self.client.profile.base_url,
+            dash, models_payload, accs_payload, top=5,
+        )
+        body = "\n".join(text.splitlines()[1:]).rstrip()
+        idx = body.find("🧠")
+        if idx != -1:
+            body = body[:idx].rstrip()
+        summary.update(body)
+
+        table.clear(columns=True)
+        table.add_columns("模型", "请求", "Tokens", "输入/输出", "缓存写/读", "费用")
+        model_data = _safe(models_payload, "data", default=[]) or []
+        for m in model_data[:10]:
+            table.add_row(
+                str(m.get("model", "?")),
+                _format_count(m.get("requests")),
+                _format_count(m.get("allTokens")),
+                f"{_format_count(m.get('inputTokens'))}/{_format_count(m.get('outputTokens'))}",
+                f"{_format_count(m.get('cacheCreateTokens'))}/{_format_count(m.get('cacheReadTokens'))}",
+                _format_money_short(_safe(m, "costs", "total")),
+            )
+
     def refresh_current(self) -> None:
-        # 真实实现见后续 task
-        pass
+        v = self.current_view
+        if v == "dashboard":
+            self._refresh_dashboard()
 
 
 # ===== CLI subparsers & entry =====
