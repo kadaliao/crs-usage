@@ -840,6 +840,41 @@ def render_admin_dashboard(
     return "\n".join(out)
 
 
+def render_api_keys_table(payload: dict[str, Any]) -> str:
+    keys = _safe(payload, "data") or payload.get("apiKeys") or []
+    if not isinstance(keys, list) or not keys:
+        return "(无 API Key)"
+
+    rows: list[tuple[str, str, str, str, str, str, str]] = [
+        ("名称", "状态", "今日请求", "今日 Tokens", "今日费用", "限额(日)", "到期"),
+    ]
+    for k in keys:
+        name = str(k.get("name") or k.get("id") or "?")
+        active = "启用" if k.get("isActive") else "禁用"
+        today = k.get("todayUsage") or k.get("usage") or {}
+        req = _format_count(today.get("requests"))
+        tokens = _format_count(today.get("allTokens") or today.get("tokens"))
+        cost = _format_money_short(today.get("cost"))
+        daily_lim = k.get("dailyCostLimit") or 0
+        limit_s = _format_money_short(daily_lim) if daily_lim else "∞"
+        expires = k.get("expiresAt") or "永不"
+        rows.append((name, active, req, tokens, cost, limit_s, expires))
+
+    widths = [0] * 7
+    for row in rows:
+        for i, c in enumerate(row):
+            widths[i] = max(widths[i], _display_width(c))
+
+    aligns = ("left", "left", "right", "right", "right", "right", "left")
+    lines: list[str] = []
+    for idx, row in enumerate(rows):
+        cells = [_pad(c, widths[i], aligns[i]) for i, c in enumerate(row)]
+        lines.append("  ".join(cells))
+        if idx == 0:
+            lines.append("  ".join("─" * widths[i] for i in range(7)))
+    return "\n".join(lines)
+
+
 # ===== CLI subparsers & entry =====
 
 def cmd_admin_tui(args: argparse.Namespace) -> int:
@@ -933,6 +968,22 @@ def cmd_admin_print(args: argparse.Namespace) -> int:
                     name, client.profile.base_url, dash, models_payload,
                     accs_payload, top=5,
                 ))
+            return 0
+        if view == "api-keys":
+            ok, payload = _safe_call(client.api_keys)
+            if not ok:
+                print(f"error: api-keys 失败：{payload}", file=sys.stderr)
+                return 1
+            if args.as_json:
+                print(json.dumps({
+                    "profile": name,
+                    "base_url": client.profile.base_url,
+                    "api_keys": payload,
+                }, ensure_ascii=False, indent=2))
+            else:
+                print(f"■ {name}  {origin_of(client.profile.base_url)}  admin / api-keys")
+                print()
+                print(render_api_keys_table(payload))
             return 0
         # 其他 view 后续 Task 实现
         print(f"view {view!r} not implemented yet", file=sys.stderr)
