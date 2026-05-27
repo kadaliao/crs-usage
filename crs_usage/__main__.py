@@ -630,7 +630,44 @@ def cmd_admin_print(args: argparse.Namespace) -> int:
 
 
 def cmd_admin_profiles(args: argparse.Namespace) -> int:
-    print(f"admin profiles {args.profile_action} not implemented yet", file=sys.stderr)
+    action = args.profile_action
+    cfg = load_admin_config()
+    profiles = cfg.get("admin_profiles") or {}
+    default = cfg.get("admin_default")
+
+    if action == "list":
+        if not profiles:
+            print("(no profiles; run `crs-usage admin setup`)")
+            return 0
+        for name, p in profiles.items():
+            mark = " *" if name == default else "  "
+            base = p.get("base_url", "-")
+            user = p.get("username", "-")
+            tok = "yes" if p.get("token") else "no"
+            print(f"{mark} {name}  base={base}  user={user}  token={tok}")
+        return 0
+
+    if action == "use":
+        if args.name not in profiles:
+            print(f"error: profile {args.name!r} 不存在", file=sys.stderr)
+            return 2
+        cfg["admin_default"] = args.name
+        save_admin_config(cfg)
+        print(f"default admin profile set to {args.name!r}")
+        return 0
+
+    if action == "remove":
+        if args.name not in profiles:
+            print(f"error: profile {args.name!r} 不存在", file=sys.stderr)
+            return 2
+        del profiles[args.name]
+        if cfg.get("admin_default") == args.name:
+            cfg.pop("admin_default", None)
+        save_admin_config(cfg)
+        print(f"removed profile {args.name!r}")
+        return 0
+
+    print(f"unknown action: {action}", file=sys.stderr)
     return 2
 
 
