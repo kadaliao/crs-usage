@@ -914,11 +914,79 @@ def render_accounts_table(account_type: str, payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ===== Admin: TUI =====
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Vertical
+from textual.widgets import Header, Footer, Static, DataTable, ContentSwitcher, Tabs, Tab
+
+
+class AdminTUI(App):
+    CSS = """
+    Screen { background: $surface; }
+    #status { dock: top; height: 1; background: $panel; padding: 0 1; }
+    #view { padding: 1 2; }
+    DataTable { height: 1fr; }
+    """
+
+    BINDINGS = [
+        Binding("d", "set_view('dashboard')", "Dashboard"),
+        Binding("k", "set_view('api-keys')", "Keys"),
+        Binding("a", "set_view('accounts')", "Accounts"),
+        Binding("t", "set_view('trend')", "Trend"),
+        Binding("r", "refresh_view", "刷新"),
+        Binding("q", "quit", "退出"),
+    ]
+
+    def __init__(self, profile_name: str, client: "AdminClient") -> None:
+        super().__init__()
+        self.profile_name = profile_name
+        self.client = client
+        self.current_view = "dashboard"
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        yield Static(
+            f"profile: {self.profile_name}  base: {self.client.profile.base_url}",
+            id="status",
+        )
+        with ContentSwitcher(initial="dashboard", id="view"):
+            yield Static("loading dashboard...", id="dashboard")
+            yield Static("loading api-keys...", id="api-keys")
+            yield Static("loading accounts...", id="accounts")
+            yield Static("loading trend...", id="trend")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.refresh_current()
+
+    def action_set_view(self, view: str) -> None:
+        self.current_view = view
+        self.query_one(ContentSwitcher).current = view
+        self.refresh_current()
+
+    def action_refresh_view(self) -> None:
+        self.refresh_current()
+
+    def refresh_current(self) -> None:
+        # 真实实现见后续 task
+        pass
+
+
 # ===== CLI subparsers & entry =====
 
 def cmd_admin_tui(args: argparse.Namespace) -> int:
-    print("admin TUI not implemented yet", file=sys.stderr)
-    return 2
+    profile_name = getattr(args, "profile", None)
+    try:
+        name, client = build_admin_client(profile_name)
+    except SystemExit:
+        raise
+    except (KeyError, AdminAuthError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    AdminTUI(name, client).run()
+    return 0
 
 
 def cmd_admin_setup(args: argparse.Namespace) -> int:
@@ -1123,6 +1191,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     admin_p = subparsers.add_parser("admin", help="管理员视图（登录 CRS /admin/*）")
     admin_sub = admin_p.add_subparsers(dest="admin_cmd")
+    admin_p.add_argument("--profile", help="profile 名（默认用 admin_default）")
     admin_p.set_defaults(func=cmd_admin_tui)
 
     setup_p = admin_sub.add_parser("setup", help="交互式登录并写入 profile")
