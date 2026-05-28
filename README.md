@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/crs-usage.svg)](https://pypi.org/project/crs-usage/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-通过本地 [Codex](https://github.com/openai/codex) 配置查询 [claude-relay-service](https://github.com/Wei-Shaw/claude-relay-service) 用量、限额、速率窗口与模型细分的 CLI。零依赖，单文件实现。
+通过本地 [Codex](https://github.com/openai/codex) 配置查询 [claude-relay-service](https://github.com/Wei-Shaw/claude-relay-service) 用量、限额、速率窗口与模型细分的 CLI。单文件实现，admin 模式依赖 textual / rich。
 
 读 `~/.codex/config.toml` 的 `[model_providers.*]`，按 provider 的 `env_key` 或 `~/.codex/auth.json` 解析 API key，并发调用：
 
@@ -52,6 +52,29 @@ crs-usage [--provider NAME] [--key KEY] [--base-url URL]
 - `--json` 输出原始 JSON（含模型细分，适合 `jq`）
 - `--timeout <sec>` HTTP 超时，默认 15
 
+## Admin 模式
+
+`crs-usage admin` 系列子命令对接 CRS 的 `/admin/*` 接口，需要用 admin 用户名 / 密码登录。
+
+```bash
+crs-usage admin setup                       # 交互式填 base_url / username / password
+crs-usage admin                             # 进 TUI（d/k/a/t 切视图，r 刷新，q 退出）
+crs-usage admin print --view dashboard
+crs-usage admin print --view api-keys --json
+crs-usage admin print --view accounts --type claude
+crs-usage admin profiles list
+crs-usage admin profiles use NAME
+crs-usage admin profiles remove NAME
+```
+
+凭据存在 `~/.config/crs-usage/config.json`（自动设为 600 权限）。
+
+**安全提示：密码以明文形式保存，依赖文件系统权限保护，请勿在共享主机上使用。**
+
+支持多 profile：`crs-usage admin setup --profile work` 写到 `work` profile，`admin profiles use work` 切换默认。
+
+token 自动持久化；过期时自动重新登录一次。
+
 ## Key 解析优先级
 
 1. `--key` 命令行参数
@@ -92,8 +115,9 @@ crs-usage [--provider NAME] [--key KEY] [--base-url URL]
 
 ## 要求
 
-- Python ≥ 3.11（依赖 stdlib `tomllib`，零第三方依赖）
-- 一个本地 `~/.codex/config.toml` 配置（或通过 `--key` `--base-url` 直接指定）
+- Python ≥ 3.11
+- 裸跑模式：一个本地 `~/.codex/config.toml` 配置（或通过 `--key` `--base-url` 直接指定）
+- admin 模式：通过 `crs-usage admin setup` 初始化 profile
 
 ## License
 
